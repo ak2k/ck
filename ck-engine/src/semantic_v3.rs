@@ -26,7 +26,7 @@ pub async fn semantic_search_v3_with_progress(
         }
     });
 
-    let index_dir = index_root.join(".ck");
+    let index_dir = ck_core::index_dir(&index_root);
     if !index_dir.exists() {
         return Err(CkError::Index(
             "Index creation failed. Please try running 'ck --index' explicitly.".to_string(),

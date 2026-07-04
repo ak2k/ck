@@ -189,7 +189,7 @@ fn find_nearest_index_root(path: &Path) -> Option<StdPathBuf> {
         path
     };
     loop {
-        if current.join(".ck").exists() {
+        if ck_core::index_exists(current) {
             return Some(current.to_path_buf());
         }
         match current.parent() {
@@ -232,7 +232,7 @@ pub(crate) fn resolve_model_from_root(
     use ck_models::ModelRegistry;
 
     let registry = ModelRegistry::default();
-    let index_dir = index_root.join(".ck");
+    let index_dir = ck_core::index_dir(index_root);
     let manifest_path = index_dir.join("manifest.json");
 
     if manifest_path.exists() {
@@ -736,7 +736,7 @@ async fn lexical_search(options: &SearchOptions) -> Result<Vec<SearchResult>> {
         }
     });
 
-    let index_dir = index_root.join(".ck");
+    let index_dir = ck_core::index_dir(&index_root);
     if !index_dir.exists() {
         return Err(CkError::Index("No index found. Run 'ck index' first.".to_string()).into());
     }
@@ -852,7 +852,7 @@ async fn build_tantivy_index(options: &SearchOptions) -> Result<Vec<SearchResult
         &options.path
     };
 
-    let index_dir = index_root.join(".ck");
+    let index_dir = ck_core::index_dir(index_root);
     let tantivy_index_path = index_dir.join("tantivy_index");
 
     fs::create_dir_all(&tantivy_index_path)?;
@@ -889,7 +889,7 @@ async fn build_tantivy_index(options: &SearchOptions) -> Result<Vec<SearchResult
         .map_err(|e| CkError::Index(format!("Failed to commit index: {e}")))?;
 
     // After building, search again with the same options
-    let tantivy_index_path = index_root.join(".ck").join("tantivy_index");
+    let tantivy_index_path = ck_core::index_dir(index_root).join("tantivy_index");
     let mut schema_builder = Schema::builder();
     let content_field = schema_builder.add_text_field("content", TEXT | STORED);
     let path_field = schema_builder.add_text_field("path", TEXT | STORED);

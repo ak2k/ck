@@ -192,7 +192,7 @@ pub fn collect_files(
     path: &Path,
     options: &ck_core::FileCollectionOptions,
 ) -> Result<Vec<PathBuf>> {
-    let index_dir = path.join(".ck");
+    let index_dir = ck_core::index_dir(path);
 
     if options.respect_gitignore {
         let overrides = build_overrides(path, &options.exclude_patterns)?;
@@ -258,7 +258,7 @@ pub async fn index_directory(
         "index_directory called with compute_embeddings={}",
         compute_embeddings
     );
-    let index_dir = path.join(".ck");
+    let index_dir = ck_core::index_dir(path);
     fs::create_dir_all(&index_dir)?;
 
     let manifest_path = index_dir.join("manifest.json");
@@ -402,7 +402,7 @@ pub async fn index_directory(
 
 pub async fn index_file(file_path: &Path, compute_embeddings: bool) -> Result<()> {
     let repo_root = find_repo_root(file_path)?;
-    let index_dir = repo_root.join(".ck");
+    let index_dir = ck_core::index_dir(&repo_root);
     fs::create_dir_all(&index_dir)?;
 
     let manifest_path = index_dir.join("manifest.json");
@@ -453,7 +453,7 @@ pub async fn update_index(
     compute_embeddings: bool,
     options: &ck_core::FileCollectionOptions,
 ) -> Result<()> {
-    let index_dir = path.join(".ck");
+    let index_dir = ck_core::index_dir(path);
     if !index_dir.exists() {
         return index_directory(
             path,
@@ -591,7 +591,7 @@ pub async fn update_index(
 }
 
 pub fn clean_index(path: &Path) -> Result<()> {
-    let index_dir = path.join(".ck");
+    let index_dir = ck_core::index_dir(path);
     if index_dir.exists() {
         fs::remove_dir_all(&index_dir)?;
     }
@@ -602,7 +602,7 @@ pub fn cleanup_index(
     path: &Path,
     options: &ck_core::FileCollectionOptions,
 ) -> Result<CleanupStats> {
-    let index_dir = path.join(".ck");
+    let index_dir = ck_core::index_dir(path);
     if !index_dir.exists() {
         return Ok(CleanupStats::default());
     }
@@ -633,7 +633,7 @@ pub fn cleanup_index(
 }
 
 pub fn get_index_stats(path: &Path) -> Result<IndexStats> {
-    let index_dir = path.join(".ck");
+    let index_dir = ck_core::index_dir(path);
     if !index_dir.exists() {
         return Ok(IndexStats::default());
     }
@@ -733,7 +733,7 @@ pub async fn smart_update_index_with_detailed_progress(
     options: &ck_core::FileCollectionOptions,
     model: Option<&str>,
 ) -> Result<UpdateStats> {
-    let index_dir = path.join(".ck");
+    let index_dir = ck_core::index_dir(path);
     let mut stats = UpdateStats::default();
 
     // Set up interrupt handler (only once per process)
@@ -1505,7 +1505,7 @@ fn find_repo_root(path: &Path) -> Result<PathBuf> {
     };
 
     loop {
-        if current.join(".ck").exists() || current.join(".git").exists() {
+        if ck_core::index_exists(current) || current.join(".git").exists() {
             return Ok(current.to_path_buf());
         }
 

@@ -841,6 +841,24 @@ async fn lexical_search(options: &SearchOptions) -> Result<Vec<SearchResult>> {
     let path_field = schema_builder.add_text_field("path", TEXT | STORED);
     let _schema = schema_builder.build();
 
+    // The directory can exist yet be unusable: unopenable (e.g. a missing meta
+    // file) or holding zero documents (a prior search built it when every
+    // candidate file was excluded or the tree was empty). Trusting such a stub
+    // would return no results forever, so rebuild instead of erroring or
+    // returning empty. The probe runs in its own scope so the index handle (and
+    // its background reload thread) is dropped before build_tantivy_index wipes
+    // the directory.
+    let needs_rebuild = match Index::open_in_dir(&tantivy_index_path) {
+        Ok(index) => index
+            .reader()
+            .map(|reader| reader.searcher().num_docs() == 0)
+            .unwrap_or(true),
+        Err(_) => true,
+    };
+    if needs_rebuild {
+        return build_tantivy_index(options).await;
+    }
+
     let index = Index::open_in_dir(&tantivy_index_path)
         .map_err(|e| CkError::Index(format!("Failed to open tantivy index: {e}")))?;
 
@@ -940,6 +958,11 @@ async fn build_tantivy_index(options: &SearchOptions) -> Result<Vec<SearchResult
     let index_dir = ck_core::index_dir(index_root);
     let tantivy_index_path = index_dir.join("tantivy_index");
 
+    // Rebuild from a clean directory: Index::create_in_dir errors if an index
+    // already exists, and a stale or empty index must not survive the rebuild.
+    if tantivy_index_path.exists() {
+        fs::remove_dir_all(&tantivy_index_path)?;
+    }
     fs::create_dir_all(&tantivy_index_path)?;
 
     let mut schema_builder = Schema::builder();
@@ -2172,5 +2195,41 @@ mod tests {
         }
         // Top score is normalized to 1.0, exactly as before this patch.
         assert!((results[0].score - 1.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_lexical_search_rebuilds_empty_stub() {
+        // Regression: a first search over a directory with no indexable files
+        // commits an empty tantivy index; a later search must rebuild rather
+        // than trust that stub once real files exist.
+        let temp_dir = TempDir::new().unwrap();
+        fs::create_dir_all(temp_dir.path().join(".ck")).unwrap();
+
+        let options = SearchOptions {
+            mode: SearchMode::Lexical,
+            query: "zebra".to_string(),
+            path: temp_dir.path().to_path_buf(),
+            recursive: true,
+            ..Default::default()
+        };
+
+        // First search builds an empty index (no files yet).
+        let empty = lexical_search(&options).await.unwrap();
+        assert!(empty.is_empty());
+
+        // A real file appears; the next search must find it.
+        fs::write(
+            temp_dir.path().join("mod.py"),
+            "def gamma():\n    zebra = 3\n    return zebra\n",
+        )
+        .unwrap();
+
+        let results = lexical_search(&options).await.unwrap();
+        assert!(
+            results
+                .iter()
+                .any(|r| r.file.file_name().unwrap() == "mod.py"),
+            "empty tantivy stub was trusted; expected a rebuild to find the new file"
+        );
     }
 }

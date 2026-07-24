@@ -5,8 +5,12 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use std::path::{Component, Path, PathBuf};
 
 /// Expand user-provided glob patterns, mimicking shell behaviour while tolerating
-/// unmatched globs by keeping the original pattern. Bare filename globs (e.g.
-/// `*.rs`) automatically get a recursive fallback to align with the CLI UX.
+/// unmatched globs by keeping the original pattern. Bare glob patterns that
+/// contain a metacharacter (e.g. `*.rs`) get a recursive `**/` fallback to align
+/// with the CLI UX. A slash-free *literal* (e.g. an accidental query word like
+/// `host`) is NOT recursively expanded: a `**/host` walk from the cwd would
+/// descend the entire tree -- following directory symlinks and ignoring
+/// `.ckignore` -- which is exactly the over-broad traversal to avoid.
 pub fn expand_glob_patterns(
     paths: &[PathBuf],
     exclude_patterns: &[String],
@@ -78,6 +82,7 @@ fn expand_glob_patterns_internal(
     for path in paths {
         for pattern in split_path_patterns(path) {
             let is_simple = !pattern.contains('/') && !pattern.contains('\\');
+            let is_glob = pattern.contains('*') || pattern.contains('?') || pattern.contains('[');
 
             let glob_path = if let Some(base) = base_dir {
                 let candidate = Path::new(&pattern);
@@ -93,7 +98,7 @@ fn expand_glob_patterns_internal(
             let glob_str = glob_path.to_string_lossy().to_string();
             let mut matched = run_glob(&glob_str, &globset, base_dir, &mut expanded)?;
 
-            if is_simple {
+            if is_simple && is_glob {
                 let fallback_path = if let Some(base) = base_dir {
                     base.join(format!("**/{pattern}"))
                 } else {
@@ -297,6 +302,43 @@ mod tests {
         assert!(has_docs, "docs directory should be present");
         assert!(has_rs, "lib.rs should be matched from glob");
         assert!(has_ts, "file.ts should be included explicitly");
+    }
+
+    #[test]
+    fn literal_bare_name_does_not_recurse() {
+        // A slash-free literal (no glob metacharacter) must NOT trigger the
+        // recursive **/name fallback -- otherwise an accidental query word walks
+        // the whole tree. The literal is kept as-is (unmatched) instead.
+        let temp_dir = tempdir().unwrap();
+        let base = temp_dir.path();
+
+        write_file(&base.join("nested/host"), "x");
+
+        let expanded = expand_glob_patterns_with_base(base, &[PathBuf::from("host")], &[])
+            .expect("expand literal");
+
+        assert!(
+            !expanded.iter().any(|p| p.ends_with("nested/host")),
+            "literal 'host' must not recursively match nested/host"
+        );
+    }
+
+    #[test]
+    fn glob_metachar_bare_name_still_recurses() {
+        // A slash-free pattern WITH a glob metacharacter keeps the recursive
+        // fallback, so `*.log` still matches nested files.
+        let temp_dir = tempdir().unwrap();
+        let base = temp_dir.path();
+
+        write_file(&base.join("nested/thing.log"), "x");
+
+        let expanded = expand_glob_patterns_with_base(base, &[PathBuf::from("*.log")], &[])
+            .expect("expand glob");
+
+        assert!(
+            expanded.iter().any(|p| p.ends_with("nested/thing.log")),
+            "*.log must still recursively match nested files"
+        );
     }
 
     #[test]

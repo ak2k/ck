@@ -420,7 +420,14 @@ fn find_search_root(include_patterns: &[IncludePattern]) -> PathBuf {
         .collect();
 
     if existing.is_empty() {
-        return PathBuf::from(".");
+        // Paths were supplied but none exist. Root at the first (missing) path
+        // rather than "." -- falling back to the cwd would crawl the whole
+        // working tree (or $HOME), the escalation this function guards against.
+        // The walk over a non-existent path simply yields no matches.
+        return include_patterns
+            .first()
+            .map(|p| p.path.clone())
+            .unwrap_or_else(|| PathBuf::from("."));
     }
 
     let mut root = if existing[0].is_dir {
@@ -1917,10 +1924,11 @@ mod tests {
     }
 
     #[test]
-    fn find_search_root_all_nonexistent_falls_back_to_dot() {
-        // When every positional resolves to nothing, root computation yields no
-        // real anchor. It must fall back to "." (the pre-existing contract),
-        // not to some widened ancestor.
+    fn find_search_root_all_nonexistent_roots_at_missing_path() {
+        // Multiple supplied paths that all resolve to nothing must root at the
+        // first (missing) path -- NOT "." -- so the walk finds nothing instead
+        // of crawling the cwd/$HOME. (A single missing path is additionally
+        // handled by the caller's len==1 override.)
         let patterns = vec![
             IncludePattern {
                 path: PathBuf::from("/no/such/path/aaa"),
@@ -1931,7 +1939,9 @@ mod tests {
                 is_dir: false,
             },
         ];
-        assert_eq!(find_search_root(&patterns), PathBuf::from("."));
+        let root = find_search_root(&patterns);
+        assert_eq!(root, PathBuf::from("/no/such/path/aaa"));
+        assert_ne!(root, PathBuf::from("."), "must not fall back to cwd");
     }
 
     #[test]

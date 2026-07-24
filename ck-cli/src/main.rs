@@ -1917,6 +1917,64 @@ mod tests {
     }
 
     #[test]
+    fn find_search_root_all_nonexistent_falls_back_to_dot() {
+        // When every positional resolves to nothing, root computation yields no
+        // real anchor. It must fall back to "." (the pre-existing contract),
+        // not to some widened ancestor.
+        let patterns = vec![
+            IncludePattern {
+                path: PathBuf::from("/no/such/path/aaa"),
+                is_dir: false,
+            },
+            IncludePattern {
+                path: PathBuf::from("/no/such/path/bbb"),
+                is_dir: false,
+            },
+        ];
+        assert_eq!(find_search_root(&patterns), PathBuf::from("."));
+    }
+
+    #[test]
+    fn find_search_root_reduces_real_dirs_to_common_ancestor() {
+        // The common-ancestor reduction across multiple *existing* directories
+        // must still work — the existence filter must not disturb it.
+        let temp_dir = tempdir().unwrap();
+        let base = temp_dir.path().canonicalize().unwrap();
+        let a = base.join("a");
+        let b = base.join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+
+        let patterns = vec![
+            IncludePattern {
+                path: a,
+                is_dir: true,
+            },
+            IncludePattern {
+                path: b,
+                is_dir: true,
+            },
+        ];
+        assert_eq!(find_search_root(&patterns), base);
+    }
+
+    #[test]
+    fn find_search_root_roots_existing_file_at_parent() {
+        // An existing *file* (is_dir = false but present) still roots at its
+        // parent directory — unchanged by the existence filter.
+        let temp_dir = tempdir().unwrap();
+        let base = temp_dir.path().canonicalize().unwrap();
+        let file = base.join("lib.rs");
+        fs::write(&file, "fn main() {}\n").unwrap();
+
+        let patterns = vec![IncludePattern {
+            path: file,
+            is_dir: false,
+        }];
+        assert_eq!(find_search_root(&patterns), base);
+    }
+
+    #[test]
     fn test_split_path_patterns_trims_whitespace_and_empties() {
         let patterns = path_utils::split_path_patterns(Path::new(" foo.rs ; ; *.html ;docs/ "));
         assert_eq!(

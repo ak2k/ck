@@ -408,21 +408,32 @@ fn canonicalize_for_comparison(path: &Path) -> PathBuf {
 }
 
 fn find_search_root(include_patterns: &[IncludePattern]) -> PathBuf {
-    if include_patterns.is_empty() {
+    // Only paths that actually exist determine the search root. A non-existent
+    // positional argument — e.g. an unquoted query word mis-parsed as a path
+    // (`ck --lex bootstrap host provision docs/memories`) — must NOT contribute
+    // its parent directory here: doing so silently widens the walk root up to
+    // the cwd (or $HOME), pulling in enormous/hidden trees. See the
+    // `find_search_root_ignores_nonexistent_paths` regression test.
+    let existing: Vec<&IncludePattern> = include_patterns
+        .iter()
+        .filter(|pattern| pattern.path.exists())
+        .collect();
+
+    if existing.is_empty() {
         return PathBuf::from(".");
     }
 
-    let mut root = if include_patterns[0].is_dir {
-        include_patterns[0].path.clone()
+    let mut root = if existing[0].is_dir {
+        existing[0].path.clone()
     } else {
-        include_patterns[0]
+        existing[0]
             .path
             .parent()
-            .unwrap_or(&include_patterns[0].path)
+            .unwrap_or(&existing[0].path)
             .to_path_buf()
     };
 
-    for pattern in include_patterns.iter().skip(1) {
+    for pattern in existing.iter().skip(1) {
         let mut candidate = if pattern.is_dir {
             pattern.path.clone()
         } else {
@@ -1870,6 +1881,39 @@ mod tests {
         assert!(has_page);
         assert!(has_docs);
         assert!(has_nested);
+    }
+
+    #[test]
+    fn find_search_root_ignores_nonexistent_paths() {
+        // Regression: an unquoted query mis-parsed into positional path args
+        // (e.g. `ck --lex bootstrap host provision docs/memories`) must not let
+        // the non-existent words widen the index root to their parent (cwd),
+        // which silently escalates the walk to the whole working tree / $HOME.
+        let temp_dir = tempdir().unwrap();
+        let base = temp_dir.path().canonicalize().unwrap();
+        let real = base.join("docs").join("memories");
+        fs::create_dir_all(&real).unwrap();
+
+        let patterns = vec![
+            IncludePattern {
+                path: base.join("host"),
+                is_dir: false,
+            },
+            IncludePattern {
+                path: base.join("provision"),
+                is_dir: false,
+            },
+            IncludePattern {
+                path: real.clone(),
+                is_dir: true,
+            },
+        ];
+
+        assert_eq!(
+            find_search_root(&patterns),
+            real,
+            "non-existent positional paths must not widen the search root"
+        );
     }
 
     #[test]

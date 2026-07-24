@@ -429,7 +429,8 @@ fn find_search_root(include_patterns: &[IncludePattern]) -> PathBuf {
         // Paths were supplied but none exist. Root at the first (missing) path
         // rather than "." -- falling back to the cwd would crawl the whole
         // working tree (or $HOME), the escalation this function guards against.
-        // The walk over a non-existent path simply yields no matches.
+        // Searching a non-existent path yields no results (the engine reports
+        // the missing path) instead of crawling the cwd.
         return include_patterns
             .first()
             .map(|p| p.path.clone())
@@ -485,6 +486,32 @@ fn find_search_root(include_patterns: &[IncludePattern]) -> PathBuf {
     } else {
         root
     }
+}
+
+/// Reduce the raw include patterns to the set used to *filter* search results,
+/// given the chosen `search_root`. Two rules:
+///
+/// - Drop an include that equals the search root itself — it is redundant, the
+///   root is already walked in full.
+/// - Drop non-existent includes when at least one real target exists. A phantom
+///   include (a typo'd path, or an unquoted query word) can never match a walked
+///   file, so leaving it in would filter *every* result away — e.g.
+///   `ck query typo docs/` would return nothing even though `docs/` is real.
+///   When ALL includes are missing, keep them: the search is expected to yield
+///   no results, and dropping them would leave an empty filter that matches the
+///   (non-existent) root's — also empty — walk.
+fn effective_include_patterns(
+    include_patterns: Vec<IncludePattern>,
+    search_root: &Path,
+) -> Vec<IncludePattern> {
+    let any_existing = include_patterns.iter().any(|p| p.path.exists());
+    include_patterns
+        .into_iter()
+        .filter(|pattern| {
+            !(pattern.is_dir && pattern.path == *search_root)
+                && (!any_existing || pattern.path.exists())
+        })
+        .collect()
 }
 
 fn build_exclude_patterns(cli: &Cli) -> Vec<String> {
@@ -1368,14 +1395,7 @@ async fn run_cli_mode(cli: Cli) -> Result<()> {
             search_root = expanded_targets[0].clone();
         }
 
-        let include_patterns = if include_patterns.len() > 1 {
-            include_patterns
-                .into_iter()
-                .filter(|pattern| !(pattern.is_dir && pattern.path == search_root))
-                .collect()
-        } else {
-            include_patterns
-        };
+        let include_patterns = effective_include_patterns(include_patterns, &search_root);
 
         // Handle multiple files like grep; allow -h/-H overrides
         let mut show_filenames = if include_patterns.is_empty() {
@@ -1991,6 +2011,76 @@ mod tests {
             is_dir: false,
         }];
         assert_eq!(find_search_root(&patterns), base);
+    }
+
+    #[test]
+    fn effective_includes_drops_phantom_when_real_target_present() {
+        // `ck query typo docs/`: a missing path next to a real dir must not
+        // filter every result away. The phantom include is dropped and the real
+        // dir (== search_root) is elided as redundant, leaving an unfiltered
+        // walk of docs.
+        let temp_dir = tempdir().unwrap();
+        let base = temp_dir.path().canonicalize().unwrap();
+        let docs = base.join("docs");
+        fs::create_dir_all(&docs).unwrap();
+
+        let include = vec![
+            IncludePattern {
+                path: base.join("typo"),
+                is_dir: false,
+            },
+            IncludePattern {
+                path: docs.clone(),
+                is_dir: true,
+            },
+        ];
+        let effective = effective_include_patterns(include, &docs);
+        assert!(
+            effective.is_empty(),
+            "phantom + redundant-root includes both dropped -> unfiltered walk"
+        );
+    }
+
+    #[test]
+    fn effective_includes_keeps_all_when_every_target_missing() {
+        // All-missing: keep the includes (the search over the missing root
+        // yields nothing anyway); do not silently turn into an unfiltered walk.
+        let patterns = vec![
+            IncludePattern {
+                path: PathBuf::from("/no/such/aaa"),
+                is_dir: false,
+            },
+            IncludePattern {
+                path: PathBuf::from("/no/such/bbb"),
+                is_dir: false,
+            },
+        ];
+        let root = PathBuf::from("/no/such/aaa");
+        assert_eq!(effective_include_patterns(patterns, &root).len(), 2);
+    }
+
+    #[test]
+    fn effective_includes_keeps_sibling_real_dirs() {
+        // Two real sibling dirs under a common-ancestor root are both retained
+        // as result filters.
+        let temp_dir = tempdir().unwrap();
+        let base = temp_dir.path().canonicalize().unwrap();
+        let a = base.join("a");
+        let b = base.join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+
+        let include = vec![
+            IncludePattern {
+                path: a,
+                is_dir: true,
+            },
+            IncludePattern {
+                path: b,
+                is_dir: true,
+            },
+        ];
+        assert_eq!(effective_include_patterns(include, &base).len(), 2);
     }
 
     #[test]

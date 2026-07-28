@@ -483,28 +483,34 @@ fn find_search_root(include_patterns: &[IncludePattern]) -> PathBuf {
 }
 
 /// Reduce the raw include patterns to the set used to *filter* search results,
-/// given the chosen `search_root`. Two rules:
+/// given the chosen `search_root`.
 ///
-/// - Drop an include that equals the search root itself — it is redundant, the
-///   root is already walked in full.
-/// - Drop non-existent includes when at least one real target exists. A phantom
-///   include (a typo'd path, or an unquoted query word) can never match a walked
-///   file, so leaving it in would filter *every* result away — e.g.
-///   `ck query typo docs/` would return nothing even though `docs/` is real.
-///   When ALL includes are missing, keep them: the search is expected to yield
-///   no results, and dropping them would leave an empty filter that matches the
-///   (non-existent) root's — also empty — walk.
+/// - If an explicit directory operand equals the search root, it subsumes every
+///   other operand beneath it, so no filter is needed — return an empty set and
+///   walk the whole root. This covers a lone `docs/` (root == docs) and a parent
+///   plus a descendant (`docs/ docs/sub/`), which must search all of `docs`, not
+///   just `docs/sub`. It also naturally drops a phantom operand: `ck query typo
+///   docs/` roots at `docs`, so `typo` is discarded and `docs` is walked in full.
+/// - Otherwise drop non-existent includes when at least one real target exists.
+///   A phantom include (a typo'd path or an unquoted query word) can never match
+///   a walked file, so keeping it would filter *every* result away. When ALL
+///   includes are missing, keep them: the search over the missing root yields no
+///   results, which is the intended outcome.
 fn effective_include_patterns(
     include_patterns: Vec<IncludePattern>,
     search_root: &Path,
 ) -> Vec<IncludePattern> {
+    if include_patterns
+        .iter()
+        .any(|p| p.is_dir && p.path == *search_root)
+    {
+        return Vec::new();
+    }
+
     let any_existing = include_patterns.iter().any(|p| p.path.exists());
     include_patterns
         .into_iter()
-        .filter(|pattern| {
-            !(pattern.is_dir && pattern.path == *search_root)
-                && (!any_existing || pattern.path.exists())
-        })
+        .filter(|pattern| !any_existing || pattern.path.exists())
         .collect()
 }
 
@@ -1389,12 +1395,12 @@ async fn run_cli_mode(cli: Cli) -> Result<()> {
 
         let include_patterns = effective_include_patterns(include_patterns, &search_root);
 
-        // Handle multiple files like grep; allow -h/-H overrides
-        let mut show_filenames = if include_patterns.is_empty() {
-            expanded_targets.len() > 1 || expanded_targets.iter().any(|p| p.is_dir())
-        } else {
-            include_patterns.len() > 1 || include_patterns.iter().any(|p| p.is_dir)
-        };
+        // Handle multiple files like grep; allow -h/-H overrides. Derive this
+        // from the user's operands (expanded_targets), not the reduced include
+        // filters -- dropping a phantom operand must not flip off the filename
+        // prefix for a genuinely multi-target search (`ck query file.rs typo`).
+        let mut show_filenames =
+            expanded_targets.len() > 1 || expanded_targets.iter().any(|p| p.is_dir());
         if cli.no_filenames {
             show_filenames = false;
         }
@@ -2029,6 +2035,33 @@ mod tests {
         assert!(
             effective.is_empty(),
             "phantom + redundant-root includes both dropped -> unfiltered walk"
+        );
+    }
+
+    #[test]
+    fn effective_includes_parent_operand_subsumes_nested() {
+        // `ck query docs/ docs/sub/`: the parent operand IS the search root, so
+        // it subsumes the nested operand -> empty filter -> the whole parent is
+        // walked, not just docs/sub.
+        let temp_dir = tempdir().unwrap();
+        let base = temp_dir.path().canonicalize().unwrap();
+        let docs = base.join("docs");
+        let sub = docs.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+
+        let include = vec![
+            IncludePattern {
+                path: docs.clone(),
+                is_dir: true,
+            },
+            IncludePattern {
+                path: sub,
+                is_dir: true,
+            },
+        ];
+        assert!(
+            effective_include_patterns(include, &docs).is_empty(),
+            "parent operand == root subsumes nested -> unfiltered walk of docs"
         );
     }
 

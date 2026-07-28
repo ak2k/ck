@@ -442,7 +442,7 @@ fn find_search_root(include_patterns: &[IncludePattern]) -> PathBuf {
     };
 
     for pattern in existing.iter().skip(1) {
-        let mut candidate = if pattern.is_dir {
+        let candidate = if pattern.is_dir {
             pattern.path.clone()
         } else {
             pattern.path.parent().unwrap_or(&pattern.path).to_path_buf()
@@ -451,28 +451,21 @@ fn find_search_root(include_patterns: &[IncludePattern]) -> PathBuf {
         if candidate.starts_with(&root) {
             continue;
         }
-
-        while !root.starts_with(&candidate) && !candidate.starts_with(&root) {
-            if let Some(parent) = root.parent() {
-                root = parent.to_path_buf();
-            } else {
-                break;
-            }
-        }
-
-        if !candidate.starts_with(&root) {
-            while let Some(parent) = candidate.parent() {
-                if parent.starts_with(&root) {
-                    candidate = parent.to_path_buf();
-                    break;
-                }
-                candidate = parent.to_path_buf();
-            }
-        }
-
         if root.starts_with(&candidate) {
             root = candidate;
+            continue;
         }
+
+        // Neither contains the other: reduce to the longest shared prefix. The
+        // previous pairwise walk could escape past it and settle on "/" (every
+        // path starts_with "/"), turning `ck query docs/ notes.md` into a
+        // whole-filesystem walk.
+        root = root
+            .components()
+            .zip(candidate.components())
+            .take_while(|(a, b)| a == b)
+            .map(|(a, _)| a)
+            .collect();
     }
 
     if root.as_os_str().is_empty() {
@@ -1992,6 +1985,47 @@ mod tests {
             },
         ];
         assert_eq!(find_search_root(&patterns), base);
+    }
+
+    #[test]
+    fn find_search_root_dir_plus_outside_file_uses_common_ancestor() {
+        // `ck query docs/ notes.md`: the file's parent is an ANCESTOR of the
+        // dir operand. The root must be that common ancestor (the base dir) --
+        // never "/" (a whole-filesystem walk) and never order-dependent.
+        let temp_dir = tempdir().unwrap();
+        let base = temp_dir.path().canonicalize().unwrap();
+        let docs = base.join("docs");
+        fs::create_dir_all(&docs).unwrap();
+        let notes = base.join("notes.md");
+        fs::write(&notes, "needle\n").unwrap();
+
+        let dir_first = vec![
+            IncludePattern {
+                path: docs.clone(),
+                is_dir: true,
+            },
+            IncludePattern {
+                path: notes.clone(),
+                is_dir: false,
+            },
+        ];
+        let file_first = vec![
+            IncludePattern {
+                path: notes,
+                is_dir: false,
+            },
+            IncludePattern {
+                path: docs,
+                is_dir: true,
+            },
+        ];
+
+        assert_eq!(
+            find_search_root(&dir_first),
+            base,
+            "dir-first must not widen"
+        );
+        assert_eq!(find_search_root(&file_first), base, "file-first");
     }
 
     #[test]

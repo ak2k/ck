@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
 ### Added
 - **`--hidden` flag** (re-implements #97, original by @peterkc): Include hidden (dot-prefixed) files and directories in both search and indexing. Off by default to preserve current behavior; when set, the file walker no longer skips dot-prefixed entries. Composes with `--no-ignore`/`--no-ckignore` (independent toggles). Threads through `SearchOptions.hidden` and `FileCollectionOptions.show_hidden` to the `ignore` crate's `WalkBuilder.hidden(!show_hidden)` in `ck-index::collect_files`.
 
+### Fixed
+- **Search root no longer escapes past the operands' shared parent** (#184): `ck <query> docs/ notes.md` — a directory operand plus a file that lives beside it rather than inside it — rooted the search/index walk at the filesystem root and walked everything. In `find_search_root`, when the candidate was an *ancestor* of the current root, a loop walked that candidate up one parent at a time looking for an ancestor contained by the (deeper) root — a condition that never held, so it ran to `/`, which the root then adopted. The reduction now takes the longest common prefix of the paths' components, so the root is the operands' actual shared parent. The old behavior was operand-order dependent and surfaced as an apparent hang, or as `Read-only file system (os error 30)` when creating an index at `/`. Note this does not change the root for operands whose *only* shared component is `/` (e.g. `ck <query> /tmp/a /var/b`), where the shared parent genuinely is the filesystem root.
+
 ## [0.7.11] - 2026-05-24
 
 ### Added
